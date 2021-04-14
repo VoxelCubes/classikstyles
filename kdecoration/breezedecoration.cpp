@@ -1063,6 +1063,11 @@ namespace Breeze
     {
         m_scaledCornerRadius = m_internalSettings->cornerRadius()*settings()->smallSpacing();
     }
+    
+    std::shared_ptr<QRegion> Decoration::windowShape(){ 
+            setWindowAndTitleBarGeometries();
+            return std::make_shared<QRegion>( QRegion( m_windowPath.toFillPolygon().toPolygon() ) );
+    }
 
 } // namespace
 
