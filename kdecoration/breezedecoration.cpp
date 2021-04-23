@@ -25,8 +25,10 @@
 #include <KColorUtils>
 #include <KSharedConfig>
 #include <KPluginFactory>
+#include <KWindowSystem>
 
 #include <QPainter>
+#include <QPainterPath>
 #include <QTextStream>
 #include <QTimer>
 #include <QDBusConnection>
@@ -139,6 +141,9 @@ namespace Breeze
     static int g_shadowSizeEnum = InternalSettings::ShadowLarge;
     static int g_shadowStrength = 255;
     static QColor g_shadowColor = Qt::black;
+    static QColor g_fontColor = Qt::black;
+    static bool g_hasNoBorders = true;
+    static bool g_isShaded = false;
     static QSharedPointer<KDecoration2::DecorationShadow> g_sShadow;
     static QSharedPointer<KDecoration2::DecorationShadow> g_sShadowInactive;
 
@@ -275,6 +280,7 @@ namespace Breeze
         connect(c, &KDecoration2::DecoratedClient::maximizedHorizontallyChanged, this, &Decoration::recalculateBorders);
         connect(c, &KDecoration2::DecoratedClient::maximizedVerticallyChanged, this, &Decoration::recalculateBorders);
         connect(c, &KDecoration2::DecoratedClient::shadedChanged, this, &Decoration::recalculateBorders);
+        connect(c, &KDecoration2::DecoratedClient::shadedChanged, this, &Decoration::updateShadow);
         connect(c, &KDecoration2::DecoratedClient::captionChanged, this,
             [this]()
             {
@@ -292,6 +298,8 @@ namespace Breeze
         connect(c, &KDecoration2::DecoratedClient::maximizedChanged, this, &Decoration::updateButtonsGeometry);
         connect(c, &KDecoration2::DecoratedClient::adjacentScreenEdgesChanged, this, &Decoration::updateButtonsGeometry);
         connect(c, &KDecoration2::DecoratedClient::shadedChanged, this, &Decoration::updateButtonsGeometry);
+        
+        connect(c, &KDecoration2::DecoratedClient::paletteChanged, this, &Decoration::updateShadow);
 
         createButtons();
         updateShadow();
@@ -741,6 +749,9 @@ namespace Breeze
     void Decoration::updateShadow()
     {
         auto s = settings();
+        auto c = client().toStrongRef();
+        Q_ASSERT(c);
+        
         // Animated case, no cached shadow object
         if ( (m_shadowAnimation->state() == QAbstractAnimation::Running) && (m_shadowOpacity != 0.0) && (m_shadowOpacity != 1.0) )
         {
@@ -748,18 +759,23 @@ namespace Breeze
             return;
         }
 
-        if (g_shadowSizeEnum != m_internalSettings->shadowSize()
+        if ( g_shadowSizeEnum != m_internalSettings->shadowSize()
                 || g_shadowStrength != m_internalSettings->shadowStrength()
-                || g_shadowColor != m_internalSettings->shadowColor())
+                || g_shadowColor != m_internalSettings->shadowColor()
+                || g_fontColor != fontColor()
+                || g_hasNoBorders != hasNoBorders()
+                || g_isShaded != c->isShaded() )
         {
             g_sShadow.clear();
             g_sShadowInactive.clear();
             g_shadowSizeEnum = m_internalSettings->shadowSize();
             g_shadowStrength = m_internalSettings->shadowStrength();
             g_shadowColor = m_internalSettings->shadowColor();
+            g_fontColor = fontColor();
+            g_hasNoBorders = hasNoBorders();
+            g_isShaded = c->isShaded();
         }
 
-        auto c = client().toStrongRef();
         auto& shadow = (c->isActive()) ? g_sShadow : g_sShadowInactive;
         if ( !shadow )
         {
@@ -771,7 +787,7 @@ namespace Breeze
     //________________________________________________________________
     QSharedPointer<KDecoration2::DecorationShadow> Decoration::createShadowObject( const float strengthScale )
     {
-          const CompositeShadowParams params = lookupShadowParams(m_internalSettings->shadowSize());
+        const CompositeShadowParams params = lookupShadowParams(m_internalSettings->shadowSize());
           if (params.isNone())
           {
               return nullptr;
@@ -786,12 +802,15 @@ namespace Breeze
 
           const QSize boxSize = BoxShadowRenderer::calculateMinimumBoxSize(params.shadow1.radius)
               .expandedTo(BoxShadowRenderer::calculateMinimumBoxSize(params.shadow2.radius));
-
+              
+          auto c = client().toStrongRef();
+          Q_ASSERT(c);
+          
+              
           BoxShadowRenderer shadowRenderer;
           shadowRenderer.setBorderRadius(m_scaledCornerRadius + 0.5);
           shadowRenderer.setBoxSize(boxSize);
           shadowRenderer.setDevicePixelRatio(1.0); // TODO: Create HiDPI shadows?
-
 
           const qreal strength = m_internalSettings->shadowStrength() / 255.0 * strengthScale;
           shadowRenderer.addShadow(params.shadow1.offset, params.shadow1.radius,
@@ -820,19 +839,44 @@ namespace Breeze
           painter.setPen(Qt::NoPen);
           painter.setBrush(Qt::black);
           painter.setCompositionMode(QPainter::CompositionMode_DestinationOut);
-          painter.drawRoundedRect(
-              innerRect,
+          
+          
+          QRect innerRectPotentiallyTaller = innerRect;
+          
+          QPainterPath innerRectPath;
+          innerRectPath.addRect(innerRect);
+          
+          // if we have no borders we don't have rounded bottom corners, so make a taller rounded rectangle and clip off its bottom
+          if ( hasNoBorders() && !c->isShaded() ) innerRectPotentiallyTaller.adjust(0,0,0,m_scaledCornerRadius); 
+          
+          QPainterPath roundedRectMask;
+          roundedRectMask.addRoundedRect(
+              innerRectPotentiallyTaller,
               m_scaledCornerRadius + 0.5,
               m_scaledCornerRadius + 0.5);
+          
+          if ( hasNoBorders() && !c->isShaded() ) roundedRectMask = roundedRectMask.intersected(innerRectPath);
+        
+          painter.drawPath(roundedRectMask);
 
-          // Draw outline.
-          painter.setPen(withOpacity(m_internalSettings->shadowColor(), 0.2 * strength));
+          // Draw outline
+          QPen p(withOpacity(fontColor(), 0.25));
+          //1px wide line
+          if ( KWindowSystem::isPlatformWayland() ) p.setWidthF(1); //Wayland aligns shadows differently to X11 and see all of the stroke line
+          else p.setWidthF(2); //*2 because you only see half of the stroke line on X11
+          painter.setPen(p);
           painter.setBrush(Qt::NoBrush);
           painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
-          painter.drawRoundedRect(
-              innerRect,
+          
+          QPainterPath roundedRectOutline;
+          roundedRectOutline.addRoundedRect(
+              innerRectPotentiallyTaller,
               m_scaledCornerRadius - 0.5,
               m_scaledCornerRadius - 0.5);
+          
+          if ( hasNoBorders() && !c->isShaded() ) roundedRectOutline = roundedRectOutline.intersected(innerRectPath);
+          
+          painter.drawPath(roundedRectOutline);
 
           painter.end();
 

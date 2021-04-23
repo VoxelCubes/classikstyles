@@ -99,6 +99,7 @@ namespace Breeze
         void updateTitleBar();
         void updateAnimationState();
         void updateSizeGripVisibility();
+        void updateShadow();
 
         private:
 
@@ -107,7 +108,6 @@ namespace Breeze
 
         void createButtons();
         void paintTitleBar(QPainter *painter, const QRect &repaintRegion);
-        void updateShadow();
         QSharedPointer<KDecoration2::DecorationShadow> createShadowObject( const float strengthScale );
         void setScaledCornerRadius();
         
